@@ -1,7 +1,7 @@
 # @name GridGlow
 # @desc Eine feste Tibber-Ansicht; fuer weitere Ansichten mit anderem Namen erneut installieren
 # @author Q14siX
-# @version 20261113.145453
+# @version 20261113.152513
 # @display 32x8
 # @requires gridglow_view
 # @requires gridglow_data

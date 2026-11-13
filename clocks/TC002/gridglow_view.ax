@@ -2,7 +2,7 @@
 # @desc Gemeinsamer Darstellungscode fuer GridGlow-Anzeigen
 # @module gridglow_view
 # @author Q14siX
-# @version 20261113.145453
+# @version 20261113.152513
 # @display 52x16
 
 import json

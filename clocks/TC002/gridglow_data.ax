@@ -2,7 +2,7 @@
 # @desc Gemeinsamer Tibber-Datenleser fuer alle GridGlow-Anzeigen auf dieser Uhr
 # @headless true
 # @author Q14siX
-# @version 20261113.145453
+# @version 20261113.152513
 # @display 52x16
 # @oauth authorize=https://thewall.tibber.com/connect/authorize token=https://thewall.tibber.com/connect/token api=data-api.tibber.com scope="openid profile email offline_access data-api-user-read data-api-homes-read data-api-prices-read" pkce auth=body
 # @needs secret, crypto
@@ -323,7 +323,7 @@ class GridGlowCore
     self.due[job] = now_ms()+60000
     self.request_id = http.post("https://api.tibber.com/v1-beta/gql", json.dump({"query":query,"variables":variables}),
       / body,status -> self.receive(job,body,status),
-      {"headers":{"Authorization":self.auth_value(),"Content-Type":"application/json","User-Agent":"AWTRIX-NG/"+version()+" GridGlow/20261113.145453"},"cap":8192,"timeout":15})
+      {"headers":{"Authorization":self.auth_value(),"Content-Type":"application/json","User-Agent":"AWTRIX-NG/"+version()+" GridGlow/20261113.152513"},"cap":8192,"timeout":15})
   end
 
   def failed(job, why, auth)
@@ -1065,7 +1065,7 @@ class GridGlowDataApiCore : GridGlowCore
     self.busy = true self.api_pending = true self.request_job = job self.request_id = nil
     self.request_at = now_ms() self.api_serial += 1
     var serial = self.api_serial
-    if !oauth.get(url,/ body,status -> self.api_receive(job,serial,body,status),{"cap":65536,"headers":{"User-Agent":"GridGlow/20261113.145453 (AWTRIX-NG/"+version()+")"}})
+    if !oauth.get(url,/ body,status -> self.api_receive(job,serial,body,status),{"cap":65536,"headers":{"User-Agent":"GridGlow/20261113.152513 (AWTRIX-NG/"+version()+")"}})
       self.busy = false self.api_pending = false self.request_job = nil
       self.api_retry(job,"VERBINDUNG")
     end
@@ -1336,7 +1336,7 @@ class GridGlowDataApiCore : GridGlowCore
     var serial = self.api_serial
     self.request_id = http.post("https://api.tibber.com/v1-beta/gql",json.dump({"query":"query GridGlowLegacyHomes{viewer{homes{id timeZone}}}"}),
       / body,status -> self.legacy_receive(serial,body,status),
-      {"headers":{"Authorization":self.auth_value(),"Content-Type":"application/json","User-Agent":"AWTRIX-NG/"+version()+" GridGlow/20261113.145453"},"cap":8192,"timeout":15})
+      {"headers":{"Authorization":self.auth_value(),"Content-Type":"application/json","User-Agent":"AWTRIX-NG/"+version()+" GridGlow/20261113.152513"},"cap":8192,"timeout":15})
   end
 
   def legacy_receive(serial, body, status)

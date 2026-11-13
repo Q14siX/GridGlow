@@ -1,25 +1,17 @@
-# GridGlow · 20261113.145453
+# GridGlow · 20261113.152513
 
 ## Deutsch
 
-- GitHub-Verzeichnis bereinigt: keine doppelte Installationsdatei, keine internen Veröffentlichungsnotizen oder Versionsmarker.
-- `index.html` startet den vollständigen Installationsassistenten unmittelbar über GitHub Pages oder lokal.
-- Alle sechs zu installierenden AWTRIX-Skripte liegen zusätzlich getrennt unter `clocks/TC001/` und `clocks/TC002/` und stimmen mit den eingebetteten Quellen überein.
-- `README.md`, `RELEASE.md`, `LICENSE.md` und ausschließlich benötigte Bilder für die Veröffentlichung sind enthalten.
-- FRITZ!Box-Standardnetz `192.168.178.0/24`, Multi-Uhr-Installation, Authentifizierung und Tibber-Einrichtung bleiben Bestandteil des Installers.
+- Online-Installer statt einer 12-MB-HTML-Datei: schlanke `index.html`.
+- App-Dateien werden beim Installieren direkt aus `clocks/` geladen und gegen SHA-256 aus `release.json` geprüft.
+- Vorschauen und GIFs werden bei Bedarf aus `images/` abgerufen.
+- FRITZ!Box-Standardbereich, geschützte Uhren, Tibber-Eingaben, gemeinsame Datenabfrage und zwei parallele Uhren bleiben erhalten.
+- Lokaler Offline-Installer ist nicht mehr Teil dieses Pakets.
+- Browser können Anfragen von HTTPS-Seiten an lokale HTTP-Uhren blockieren; dies wurde nicht auf realen Geräten verifiziert.
 
 ## English
 
-- Minimal GitHub publishing directory with one standalone `index.html` installer.
-- All six installable AWTRIX scripts are included separately under the two model folders and match the embedded installer bundle.
-- README, release notes, license and only necessary publication images included.
-- Existing multi-clock installation, authentication and Tibber setup are preserved.
-
-Software verification does not constitute successful installation on physical clocks.
-
-
-### Korrektur der Preisdiagramme
-Die Kurve verwendet jetzt das tatsächliche Tagesminimum als untere und das Tagesmaximum als obere Skalenbegrenzung. Die Zeitmarkierung bleibt eine blinkende vertikale Linie. Die Kurve startet die Titelanzeige während derselben AWTRIX-App-Rotation nicht von selbst erneut. Eine Kurvenaktualisierung führt nicht zurück zur Titelanzeige.
-
-### Price chart correction
-The actual daily minimum maps to the bottom row and the maximum to the top row. The vertical time indicator continues blinking. No automatic chart-to-heading reset during the same AWTRIX app slot, even after refreshing data.
+- Lightweight GitHub Pages installer with remote, hash-checked `.ax` downloads and lazy-loaded previews.
+- All required clock scripts, images, GIFs, README, release notes and license included.
+- Existing multi-clock selection and configuration features remain available.
+- No downloaded offline installer. Access to local HTTP clocks from HTTPS is subject to browser security restrictions.

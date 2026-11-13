@@ -1,0 +1,77 @@
+{
+  "version": "20261113.152513",
+  "models": {
+    "TC001": {
+      "module": {
+        "path": "clocks/TC001/gridglow_view.ax",
+        "sha256": "41fe78067e2c31058762ab9c8ebbd746bc8eebc844f941052062b2a76ee56df0"
+      },
+      "provider": {
+        "path": "clocks/TC001/gridglow_data.ax",
+        "sha256": "6b276400c3c27a9632aa1d7e9b9fcdc65a58896d1c75ad41ac85a3af9ea2542c"
+      },
+      "display": {
+        "path": "clocks/TC001/GridGlow.ax",
+        "sha256": "947c51e40a7e5d1db9df083ba6f486af6fb7519cae61758f54c7c5875820a3e8"
+      }
+    },
+    "TC002": {
+      "module": {
+        "path": "clocks/TC002/gridglow_view.ax",
+        "sha256": "c13d43bffca22cb701d4faec44fb779a9bca8cd362497165dc8ffd354a51c7f8"
+      },
+      "provider": {
+        "path": "clocks/TC002/gridglow_data.ax",
+        "sha256": "9f4716ae284b987d2b2203f5092cd51e0d080ad34062adb2f9b02170d4f1df12"
+      },
+      "display": {
+        "path": "clocks/TC002/GridGlow.ax",
+        "sha256": "5b3bae8af4dbc91b03cc7e022936efc8f31da873f962ac89a22162b94363cc74"
+      }
+    }
+  },
+  "images": {
+    "TC001": {
+      "views": {
+        "price": "images/TC001/price.png",
+        "next": "images/TC001/next.png",
+        "today_chart": "images/TC001/today_chart.png",
+        "tomorrow_chart": "images/TC001/tomorrow_chart.png",
+        "price_min": "images/TC001/price_min.png",
+        "price_max": "images/TC001/price_max.png",
+        "price_mean": "images/TC001/price_mean.png",
+        "cheap_window": "images/TC001/cheap_window.png",
+        "last_import": "images/TC001/last_import.png",
+        "last_export": "images/TC001/last_export.png",
+        "last_import_power": "images/TC001/last_import_power.png",
+        "last_export_power": "images/TC001/last_export_power.png",
+        "yesterday_import": "images/TC001/yesterday_import.png",
+        "yesterday_export": "images/TC001/yesterday_export.png",
+        "yesterday_cost": "images/TC001/yesterday_cost.png",
+        "yesterday_profit": "images/TC001/yesterday_profit.png"
+      },
+      "gif": "images/TC001/preview.gif"
+    },
+    "TC002": {
+      "views": {
+        "price": "images/TC002/price.png",
+        "next": "images/TC002/next.png",
+        "today_chart": "images/TC002/today_chart.png",
+        "tomorrow_chart": "images/TC002/tomorrow_chart.png",
+        "price_min": "images/TC002/price_min.png",
+        "price_max": "images/TC002/price_max.png",
+        "price_mean": "images/TC002/price_mean.png",
+        "cheap_window": "images/TC002/cheap_window.png",
+        "last_import": "images/TC002/last_import.png",
+        "last_export": "images/TC002/last_export.png",
+        "last_import_power": "images/TC002/last_import_power.png",
+        "last_export_power": "images/TC002/last_export_power.png",
+        "yesterday_import": "images/TC002/yesterday_import.png",
+        "yesterday_export": "images/TC002/yesterday_export.png",
+        "yesterday_cost": "images/TC002/yesterday_cost.png",
+        "yesterday_profit": "images/TC002/yesterday_profit.png"
+      },
+      "gif": "images/TC002/preview.gif"
+    }
+  }
+}

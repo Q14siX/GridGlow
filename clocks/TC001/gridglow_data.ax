@@ -2,7 +2,7 @@
 # @desc Gemeinsamer Tibber-Datenleser fuer alle GridGlow-Anzeigen auf dieser Uhr
 # @headless true
 # @author Q14siX
-# @version 20261113.145453
+# @version 20261113.152513
 # @display 32x8
 # @config api_token text "Tibber API-Token" maxlen=512 help="Persoenlichen Token ohne Bearer eingeben. Normales Textfeld; in Backups sichtbar." group="Tibber"
 # @config home_index number "Tibber-Zuhause" default=1 min=1 max=20 step=1 help="Nummer in der Tibber-Homes-Liste; 1 ist das erste Zuhause." group="Tibber"
@@ -320,7 +320,7 @@ class GridGlowCore
     self.due[job] = now_ms()+60000
     self.request_id = http.post("https://api.tibber.com/v1-beta/gql", json.dump({"query":query,"variables":variables}),
       / body,status -> self.receive(job,body,status),
-      {"headers":{"Authorization":self.auth_value(),"Content-Type":"application/json","User-Agent":"AWTRIX-NG/"+version()+" GridGlow/20261113.145453"},"cap":8192,"timeout":15})
+      {"headers":{"Authorization":self.auth_value(),"Content-Type":"application/json","User-Agent":"AWTRIX-NG/"+version()+" GridGlow/20261113.152513"},"cap":8192,"timeout":15})
   end
 
   def failed(job, why, auth)
