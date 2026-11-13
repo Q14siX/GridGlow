@@ -1,0 +1,1043 @@
+# @name GridGlow Daten
+# @desc Gemeinsamer Tibber-Datenleser fuer alle GridGlow-Anzeigen auf dieser Uhr
+# @headless true
+# @author Q14siX
+# @version 20261113.145453
+# @display 32x8
+# @config api_token text "Tibber API-Token" maxlen=512 help="Persoenlichen Token ohne Bearer eingeben. Normales Textfeld; in Backups sichtbar." group="Tibber"
+# @config home_index number "Tibber-Zuhause" default=1 min=1 max=20 step=1 help="Nummer in der Tibber-Homes-Liste; 1 ist das erste Zuhause." group="Tibber"
+# @config reset_home bool "Zuhause neu zuordnen" default=false help="Gespeicherte Home-ID einmalig loeschen und die gewaehlte Nummer neu zuordnen." group="Tibber"
+# @config window_hours number "Guenstiges Zeitfenster" default=2 min=1 max=6 step=1 unit=h group="Tibber"
+# @config color_low color "Guenstiger Preis" default=#2DE2BA group="Farben"
+# @config color_high color "Teurer Preis" default=#FF5C70 group="Farben"
+# @config color_import color "Bezug" default=#FFAD5C group="Farben"
+# @config color_export color "Einspeisung" default=#2DE2BA group="Farben"
+
+# GridGlow HTTP data core. Loaded once by the on-clock background provider.
+# auth_ready() and auth_value() belong to the platform-specific subclass.
+import json
+import string
+import gc
+
+class GridGlowCore
+  var home, home_name, today, tomorrow, current, history, got, errors, due, failures
+  var busy, request_id, request_job, request_at, blocked_until, low, high, imp, exp, window, sw
+  var chart_cache, cheap_cache, cheap_minute, day_key, requested
+
+  def core_init()
+    if store.get("reset_home",false)
+      store.set("selected_home",nil)
+      store.set("selected_index",nil)
+      store.set("reset_home",false)
+    end
+    self.home = nil
+    self.home_name = ""
+    self.today = nil
+    self.tomorrow = nil
+    self.current = nil
+    self.history = {}
+    self.got = {}
+    self.errors = {}
+    self.due = {}
+    self.failures = {}
+    self.busy = false
+    self.request_id = nil
+    self.request_job = nil
+    self.request_at = 0
+    self.blocked_until = 0
+    self.low = store.get("color_low", 0x2DE2BA)
+    self.high = store.get("color_high", 0xFF5C70)
+    self.imp = store.get("color_import", 0xFFAD5C)
+    self.exp = store.get("color_export", 0x2DE2BA)
+    self.window = clamp(int(store.get("window_hours", 2)), 1, 6)
+    self.sw = width()
+    self.chart_cache = {}
+    self.cheap_cache = nil
+    self.cheap_minute = -1
+    self.day_key = nil
+    self.requested = []
+  end
+
+  def field(v, key)
+    return isinstance(v, map) ? v.find(key) : nil
+  end
+
+  def enabled(name)
+    return self.requested.find(name) != nil
+  end
+
+  def cancel_pending()
+    if self.request_id != nil http.cancel(self.request_id) end
+    if self.request_job != nil self.due[self.request_job] = 0 end
+    self.busy = false self.request_id = nil self.request_job = nil
+  end
+
+  # UTC seconds, offset seconds, local civil day, local minute. Integers stay 64-bit.
+  def stamp(s)
+    if type(s) != "string" || size(s) < 20 || size(s) > 40 return nil end
+    if s[4] != "-" || s[7] != "-" || s[10] != "T" || s[13] != ":" || s[16] != ":" return nil end
+    if re.search("[^0-9T:Z+.-]", s) != nil return nil end
+    var y = int(s[0..3])
+    var m = int(s[5..6])
+    var d = int(s[8..9])
+    var hh = int(s[11..12])
+    var mm = int(s[14..15])
+    var ss = int(s[17..18])
+    if y < 1970 || y > 2400 || m < 1 || m > 12 || d < 1 || hh > 23 || mm > 59 || ss > 59 return nil end
+    var md = 31
+    if m == 4 || m == 6 || m == 9 || m == 11
+      md = 30
+    elif m == 2
+      md = y%4 == 0 && (y%100 != 0 || y%400 == 0) ? 29 : 28
+    end
+    if d > md return nil end
+    var off = 0
+    var tail = size(s)-1
+    if s[tail] != "Z"
+      tail = size(s)-6
+      if tail < 19 || (s[tail] != "+" && s[tail] != "-") || s[tail+3] != ":" return nil end
+      var oh = int(s[tail+1..tail+2])
+      var om = int(s[tail+4..tail+5])
+      if oh > 14 || om > 59 return nil end
+      off = (oh*60+om)*60
+      if s[tail] == "-" off = -off end
+    end
+    if tail > 19 && (s[19] != "." || re.search("^[0-9]+$", s[20..tail-1]) == nil) return nil end
+    var yy = y - (m <= 2 ? 1 : 0)
+    var era = yy/400
+    var ye = yy-era*400
+    var dm = m + (m > 2 ? -3 : 9)
+    var dn = era*146097 + ye*365 + ye/4 - ye/100 + (153*dm+2)/5 + d-1 - 719468
+    return [dn*86400+hh*3600+mm*60+ss-off, off, dn, hh*60+mm]
+  end
+
+  def micro(v)
+    if type(v) == "string"
+      if size(v)>64 || re.search("^-?[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?$",v) == nil return nil end
+      var minus = v[0] == "-"
+      if minus v = v[1..size(v)-1] end
+      var exponent = 0
+      var at = string.find(v,"e")
+      if at < 0 at = string.find(v,"E") end
+      if at >= 0
+        var e = v[at+1..size(v)-1]
+        if size(e)>4 return e[0] == "-" ? 0 : nil end
+        exponent = int(e)
+        v = v[0..at-1]
+      end
+      at = string.find(v,".")
+      var decimals = at < 0 ? 0 : size(v)-at-1
+      if at >= 0 v = v[0..at-1]+v[at+1..size(v)-1] end
+      while size(v)>1 && v[0] == "0" v = v[1..size(v)-1] end
+      if size(v)>18 return nil end
+      var value = int(v)
+      var shift = 6+exponent-decimals
+      if shift>20 return value == 0 ? 0 : nil end
+      if shift < -18 return 0 end
+      if shift>=0
+        while shift>0
+          if value>10000000000000 return nil end
+          value *= 10
+          shift -= 1
+        end
+      else
+        var divisor = 1
+        while shift<0 divisor *= 10 shift += 1 end
+        value = self.rounded_div(value,divisor)
+      end
+      if value>100000000000000 return nil end
+      return minus ? -value : value
+    end
+    if type(v) != "int" && type(v) != "real" return nil end
+    if v != v || v < -100000000 || v > 100000000 return nil end
+    return round(v*1000000.0)
+  end
+
+  def fixed(v, decimals)
+    if v == nil return "--" end
+    var sign = v < 0 ? "-" : ""
+    if v < 0 v = -v end
+    var divisor = 1
+    for k : 1..decimals divisor *= 10 end
+    if decimals == 0 return sign + str(v) end
+    return sign + str(v/divisor) + "," + format("%0"+str(decimals)+"d", v%divisor)
+  end
+
+  def rounded_div(v, divisor)
+    return v < 0 ? -((-v+divisor/2)/divisor) : (v+divisor/2)/divisor
+  end
+
+  def price_text(v, currency)
+    return v == nil ? "--" : self.fixed(self.rounded_div(v, currency == "EUR" ? 100 : 100), currency == "EUR" ? 2 : 4)
+  end
+
+  def price_unit(currency)
+    return currency == "EUR" ? "ct/kWh" : (currency == nil ? "?/kWh" : currency + "/kWh")
+  end
+
+  def hhmm(t, offset)
+    var mins = ((t+offset)%86400)/60
+    return format("%02d:%02d", mins/60, mins%60)
+  end
+
+  def date_label(t, offset)
+    var z = (t+offset)/86400+719468
+    var era = z/146097
+    var doe = z-era*146097
+    var ye = (doe-doe/1460+doe/36524-doe/146096)/365
+    var dy = doe-(365*ye+ye/4-ye/100)
+    var mp = (5*dy+2)/153
+    return format("%02d.%02d.", dy-(153*mp+2)/5+1, mp+(mp<10 ? 3 : -9))
+  end
+
+  def offset_label(offset)
+    var v = offset < 0 ? -offset : offset
+    return "UTC" + (offset < 0 ? "-" : "+") + format("%02d:%02d", v/3600, (v/60)%60)
+  end
+
+  # A repeated wall time is proved by another published offset for that home day.
+  def repeated_time(t, offset)
+    var civil = t+offset
+    for d : [self.today,self.tomorrow]
+      if d != nil && d["day"] == civil/86400
+        var rows = d["r"]
+        for other : [rows.geti(9,4),rows.geti(size(rows)-4,4)]
+          if other != offset
+            var alternative = self.lookup(civil-other)
+            if alternative != nil && alternative[2] == other return true end
+          end
+        end
+      end
+    end
+    return false
+  end
+
+  # Dates are omitted only when the current home day is known from Tibber.
+  def interval_text(a, b, oa, ob, repeated)
+    var da = (a+oa)/86400
+    var db = (b+ob)/86400
+    var now = epoch_ms()/1000
+    var current = self.lookup(now)
+    var same_day = current != nil && (now+current[2])/86400 == da
+    var left = self.hhmm(a,oa)+" Uhr"
+    var right = self.hhmm(b,ob)+" Uhr"
+    if da != db || !same_day left = self.date_label(a,oa)+" "+left end
+    if da != db right = self.date_label(b,ob)+" "+right end
+    if oa != ob
+      left += " ("+self.offset_label(oa)+")"
+      right += " ("+self.offset_label(ob)+")"
+    elif repeated || self.repeated_time(a,oa) || self.repeated_time(b,ob)
+      right += " ("+self.offset_label(oa)+")"
+    end
+    return left+" - "+right
+  end
+
+  def blend(a, b, amount)
+    var r = ((a>>16)&255)*(100-amount) + ((b>>16)&255)*amount
+    var g = ((a>>8)&255)*(100-amount) + ((b>>8)&255)*amount
+    var z = (a&255)*(100-amount) + (b&255)*amount
+    return ((r/100)<<16) | ((g/100)<<8) | (z/100)
+  end
+
+  def price_color(v, d)
+    if v == nil return 0x667080 end
+    if v < 0 return self.low end
+    if d == nil || d["lo"] == nil || d["lo"] == d["hi"] return self.low end
+    var q = clamp((v-d["lo"])*100/(d["hi"]-d["lo"]), 0, 100)
+    return q < 50 ? self.blend(self.low, 0xFFC857, q*2) : self.blend(0xFFC857, self.high, (q-50)*2)
+  end
+
+  def needed(job)
+    if job == "homes" return self.home == nil end
+    if self.home == nil return false end
+    if job == "today" return true end
+    if job == "tomorrow" return self.enabled("tomorrow_chart") || self.enabled("cheap_window") || self.enabled("next") end
+    if job == "last_import" return self.enabled("last_import") || self.enabled("last_import_power") end
+    if job == "last_export" return self.enabled("last_export") || self.enabled("last_export_power") end
+    if self.today == nil return false end
+    if job == "yesterday_import" return self.enabled("yesterday_import") || self.enabled("yesterday_cost") end
+    return self.enabled("yesterday_export") || self.enabled("yesterday_profit")
+  end
+
+  def core_loop()
+    if !self.auth_ready() || size(self.requested) == 0
+      self.cancel_pending()
+      return
+    end
+    if epoch_ms() < 0 return end
+    var clock = epoch_ms()/1000
+    if self.today != nil && clock >= self.today["end"]
+      if self.tomorrow != nil && clock >= self.tomorrow["start"] && clock < self.tomorrow["end"]
+        self.today = self.tomorrow
+        self.tomorrow = nil
+        self.got["today"] = self.got.find("tomorrow", 0)
+      else
+        self.today = nil
+      end
+      self.current = nil
+      self.chart_cache = {}
+      self.cheap_cache = nil
+      self.due["today"] = 0
+      self.due["tomorrow"] = 0
+      self.due["yesterday_import"] = 0
+      self.due["yesterday_export"] = 0
+    end
+    if self.busy && now_ms()-self.request_at > 45000 && self.request_id != nil
+      var job = self.request_job
+      self.cancel_pending()
+      if job != nil self.failed(job,"VERBINDUNG",false) end
+    end
+    if self.busy || now_ms() < self.blocked_until return end
+    for job : ["homes","today","tomorrow","last_import","last_export","yesterday_import","yesterday_export"]
+      if self.needed(job) && now_ms() >= self.due.find(job, 0)
+        self.fetch(job)
+        return
+      end
+    end
+  end
+
+  def fetch(job)
+    var query = ""
+    var variables = {"id": self.home}
+    if job == "homes"
+      query = "query GridGlowHomes{viewer{homes{id appNickname timeZone}}}"
+      variables = {}
+    elif job == "today" || job == "tomorrow"
+      var fields = job == "today" ? "current{t:total s:startsAt u:currency} today{t:total s:startsAt u:currency}" : "tomorrow{t:total s:startsAt u:currency}"
+      query = "query GridGlowPrices($id:ID!){viewer{home(id:$id){currentSubscription{priceInfo(resolution:QUARTER_HOURLY){"+fields+"}}}}}"
+    else
+      var incoming = job == "last_import" || job == "yesterday_import"
+      var energy = incoming ? "consumption" : "production"
+      var money = incoming ? "cost" : "profit"
+      query = "query GridGlowHistory($id:ID!,$n:Int!,$b:String){viewer{home(id:$id){"+energy+"(resolution:HOURLY,last:$n,before:$b,filterEmptyNodes:false){n:nodes{f:from t:to e:"+energy+" u:"+energy+"Unit c:"+money+" m:currency} p:pageInfo{f:filtered}}}}}"
+      var yesterday = job == "yesterday_import" || job == "yesterday_export"
+      variables["n"] = yesterday ? 26 : 6
+      variables["b"] = yesterday ? bytes().fromstring(self.today["mid"]).tob64() : nil
+    end
+    self.busy = true
+    self.request_job = job
+    self.request_at = now_ms()
+    self.due[job] = now_ms()+60000
+    self.request_id = http.post("https://api.tibber.com/v1-beta/gql", json.dump({"query":query,"variables":variables}),
+      / body,status -> self.receive(job,body,status),
+      {"headers":{"Authorization":self.auth_value(),"Content-Type":"application/json","User-Agent":"AWTRIX-NG/"+version()+" GridGlow/20261113.145453"},"cap":8192,"timeout":15})
+  end
+
+  def failed(job, why, auth)
+    self.errors[job] = why
+    var n = min(self.failures.find(job, 0)+1, 6)
+    self.failures[job] = n
+    self.due[job] = now_ms()+min(30000*(1<<(n-1)),900000)+(now_ms()%7000)
+    if auth self.blocked_until = now_ms()+900000 end
+  end
+
+  # All requested node fields are flat scalars. Validate the small JSON envelope,
+  # then decode one object at a time instead of retaining 100 maps on the TC001.
+  def array_span(body, key)
+    var at = string.find(body,"\""+key+"\"")
+    if at < 0 return nil end
+    var a = string.find(body,"[",at)
+    if a < 0 return nil end
+    var b = string.find(body,"]",a)
+    if b < 0 raise "value_error","truncated array" end
+    return [a,b]
+  end
+
+  def next_row(source)
+    var doc = source[0]
+    var p = source[1]
+    var limit = source[2]
+    while p < limit && string.find(" \t\r\n",doc[p]) >= 0 p += 1 end
+    if p == limit return nil end
+    if source[3]>0
+      if doc[p] != "," raise "value_error","array separator" end
+      p += 1
+      while p < limit && string.find(" \t\r\n",doc[p]) >= 0 p += 1 end
+    end
+    if p >= limit || doc[p] != "{" raise "value_error","array object" end
+    var ending = string.find(doc,"}",p)
+    if ending < 0 || ending >= limit raise "value_error","array ending" end
+    var row = self.exact_row(doc[p..ending])
+    source[1] = ending+1
+    source[3] += 1
+    if source[3]%4 == 0 gc.collect() end
+    return row
+  end
+
+  # Preserve the API's decimal numerals before Berry's float32 JSON values round.
+  def exact_row(doc)
+    var row = json.load(doc)
+    if !isinstance(row,map) raise "value_error","invalid row" end
+    for key : ["t","e","c"]
+      var m = re.search("\""+key+"\"[ \t\r\n]*:[ \t\r\n]*([-+0-9.eE]+)",doc)
+      if m != nil row[key] = m[1] end
+    end
+    return row
+  end
+
+  def receive(job, body, status)
+    try
+      self.receive_data(job,body,status)
+    except ..
+      self.busy = false
+      self.request_id = nil
+      self.request_job = nil
+      self.failed(job,"ANTWORT UNGUELTIG",false)
+    end
+  end
+
+  def receive_data(job, body, status)
+    self.busy = false
+    self.request_id = nil
+    self.request_job = nil
+    if status == 401 || status == 403
+      self.failed(job,"TOKEN PRUEFEN",true)
+      return
+    end
+    if status != 200 || body == nil
+      self.failed(job,status == 429 ? "API LIMIT" : "VERBINDUNG",false)
+      return
+    end
+    self.chart_cache = {}
+    self.cheap_cache = nil
+    gc.collect()
+    var source = nil
+    var envelope = body
+    if job != "homes"
+      var span = self.array_span(body,job == "today" || job == "tomorrow" ? job : "n")
+      if span != nil
+        source = [body,span[0]+1,span[1],0]
+        envelope = body[0..span[0]]+body[span[1]..size(body)-1]
+      end
+    end
+    var response = json.load(envelope)
+    if !isinstance(response, map)
+      self.failed(job,"ANTWORT UNGUELTIG",false)
+      return
+    end
+    var problems = response.find("errors")
+    if isinstance(problems,list)
+      for problem : problems
+        if self.field(self.field(problem,"extensions"),"code") == "UNAUTHENTICATED"
+          self.failed(job,"TOKEN PRUEFEN",true)
+          return
+        end
+      end
+    end
+    var viewer = self.field(response.find("data"),"viewer")
+    if !isinstance(viewer,map)
+      self.failed(job,"API FEHLER",false)
+      return
+    end
+    var valid = false
+    if job == "homes"
+      var homes = viewer.find("homes")
+      var chosen = clamp(int(store.get("home_index",1)),1,20)-1
+      var saved = store.get("selected_home")
+      if isinstance(homes,list) && store.get("selected_index") == chosen+1 && type(saved) == "string"
+        chosen = -1
+        var n = 0
+        for item : homes
+          if self.field(item,"id") == saved chosen = n end
+          n += 1
+        end
+      end
+      if isinstance(homes,list) && chosen >= 0 && chosen < size(homes)
+        var hid = self.field(homes[chosen],"id")
+        if type(hid) == "string" && size(hid)>0
+          self.home = hid
+          self.home_name = self.field(homes[chosen],"appNickname")
+          store.set("selected_home", hid)
+          store.set("selected_index", clamp(int(store.get("home_index",1)),1,20))
+          valid = true
+        end
+      end
+      if !valid self.errors[job] = "Z U H A U S E ?" end
+    elif job == "today" || job == "tomorrow"
+      var pi = self.field(self.field(self.field(viewer,"home"),"currentSubscription"),"priceInfo")
+      var has_tomorrow = isinstance(self.field(pi,"tomorrow"),list)
+      # Schema/authentication checks are complete; only the streaming source is needed.
+      pi = nil response = nil viewer = nil problems = nil envelope = nil
+      var result = source == nil ? nil : self.read_day(source)
+      if job == "today"
+        var cur = re.search("\"current\"[ \t\r\n]*:[ \t\r\n]*(\\{[^{}]*\\})",body)
+        self.current = cur == nil ? nil : self.read_current(self.exact_row(cur[1]))
+        if result != nil
+          self.today = result
+          if self.tomorrow != nil && self.tomorrow["currency"] != result["currency"]
+            self.tomorrow = nil
+            self.due["tomorrow"] = 0
+          end
+          self.day_key = result["day"]
+          valid = true
+        elif self.current != nil
+          valid = true
+        end
+      elif result != nil
+        if self.today != nil && result["currency"] != self.today["currency"]
+          self.failed(job,"WAEHRUNG PRUEFEN",false)
+          return
+        end
+        self.tomorrow = result
+        valid = true
+      elif source != nil && source[3] == 0 && has_tomorrow
+        self.tomorrow = nil
+        valid = true
+        self.errors[job] = "NOCH NICHT DA"
+      end
+      self.chart_cache = {}
+      self.cheap_cache = nil
+    else
+      var incoming = job == "last_import" || job == "yesterday_import"
+      var node = self.field(self.field(viewer,"home"),incoming ? "consumption" : "production")
+      if source != nil && isinstance(self.field(node,"n"),list)
+        node = nil response = nil viewer = nil problems = nil envelope = nil
+        self.history[job] = self.read_history(source, job == "yesterday_import" || job == "yesterday_export")
+        valid = true
+      end
+    end
+    if !valid
+      self.failed(job,"KEINE DATEN",false)
+      return
+    end
+    self.got[job] = now_ms()
+    self.failures[job] = 0
+    if !(job == "tomorrow" && self.tomorrow == nil) self.errors.remove(job) end
+    var pause = job == "today" && self.today != nil && self.today["ok"] ? 86400000 : 900000
+    if job == "tomorrow" && self.tomorrow != nil && self.tomorrow["ok"] pause = 21600000 end
+    if job == "last_import" || job == "last_export" pause = 3600000 end
+    if job == "yesterday_import" || job == "yesterday_export" pause = 3600000 end
+    self.due[job] = now_ms()+pause+(now_ms()%17000)
+  end
+
+  def read_current(row)
+    var at = self.stamp(self.field(row,"s"))
+    var val = self.micro(self.field(row,"t"))
+    var cur = self.field(row,"u")
+    return at == nil || val == nil || type(cur) != "string" ? nil : [at[0],val,at[1],cur]
+  end
+
+  # A price uses 13 bytes: signed int64 micro-currency, present flag, signed offset.
+  # UTC starts follow the explicitly verified 900-second grid; no per-row map.
+  def packed_price(rows, k)
+    return rows.get(k+8,1) == 0 ? nil : rows.geti(k+4,4)*4294967296+(rows.get(k,4)&0xFFFFFFFF)
+  end
+
+  def read_day(source)
+    var flat = bytes()
+    var first = nil
+    var last = nil
+    var midnight = nil
+    var count = 0
+    var currency = nil
+    var lo = nil
+    var hi = nil
+    var total = 0
+    var complete = true
+    while true
+      var row = self.next_row(source)
+      if row == nil break end
+      count += 1
+      if count > 100 return nil end
+      var at = self.stamp(self.field(row,"s"))
+      var cur = self.field(row,"u")
+      if at == nil || type(cur) != "string" || size(cur)<1 || size(cur)>8 return nil end
+      if first == nil
+        first = at
+        midnight = row["s"]
+        currency = cur
+        if (at[0]+at[1])%86400 != 0 return nil end
+      elif at[0] != last[0]+900 || at[2] != first[2] || cur != currency
+        return nil
+      end
+      var val = self.micro(self.field(row,"t"))
+      if val == nil
+        complete = false
+      else
+        lo = lo == nil ? val : min(lo,val)
+        hi = hi == nil ? val : max(hi,val)
+        total += val
+      end
+      var bits = val == nil ? 0 : val
+      var lower = bits&0xFFFFFFFF
+      flat.add(lower,4)
+      flat.add((bits-lower)/4294967296,4)
+      flat.add(val == nil ? 0 : 1,1)
+      flat.add(at[1],4)
+      last = at
+      row = nil
+    end
+    if last == nil || last[3] != 1425 || (count!=92 && count!=96 && count!=100) return nil end
+    return {"r":flat,"start":first[0],"end":last[0]+900,"day":first[2],"mid":midnight,"currency":currency,"lo":lo,"hi":hi,"mean":complete ? self.rounded_div(total,count) : nil,"ok":complete}
+  end
+
+  # Compact history: [from, to, energy, cost, currency, from-offset, to-offset, repeated].
+  # UTC bounds and independent energy/money coverage remain explicit.
+  def history_row(row)
+    var f = self.stamp(self.field(row,"f"))
+    var t = self.stamp(self.field(row,"t"))
+    if f == nil || t == nil || t[0] <= f[0] || t[0] > epoch_ms()/1000 return nil end
+    var e = self.micro(self.field(row,"e"))
+    var u = self.field(row,"u")
+    if (u != nil && u != "kWh") || (e != nil && e < 0) e = nil end
+    var cost = self.micro(self.field(row,"c"))
+    var currency = self.field(row,"m")
+    if type(currency) != "string" || size(currency)<1 || size(currency)>8 cost = nil end
+    return [f[0],t[0],e,cost,currency,f[1],t[1],f[2],f[3]]
+  end
+
+  def read_history(source, yesterday)
+    if yesterday && self.today == nil return nil end
+    var latest = nil
+    var edges = yesterday ? nil : []
+    var end_at = yesterday ? self.today["start"] : 0
+    var target = yesterday ? self.today["day"]-1 : 0
+    var ordered = []
+    var first = nil
+    var final_offset = 0
+    var greatest_end = 0
+    var ok = true
+    var money_ok = true
+    var energy = 0
+    var amount = 0
+    var currency = nil
+    while true
+      var node = self.next_row(source)
+      if node == nil break end
+      if source[3]>26 return nil end
+      var row = self.history_row(node)
+      node = nil
+      if row != nil
+        if !yesterday
+          edges.push(row[0]+row[5])
+          edges.push(row[5])
+          edges.push(row[1]+row[6])
+          edges.push(row[6])
+          if row[2] != nil && (latest == nil || row[1] > latest[1]) latest = row end
+        elif row[7] == target && row[1] <= end_at
+          var pos = 0
+          while pos < size(ordered) && ordered[pos] < row[0] pos += 2 end
+          ordered.insert(pos,row[0])
+          ordered.insert(pos+1,row[1])
+          if first == nil || row[0] < first[0] first = [row[0],row[5]] end
+          if row[1] > greatest_end greatest_end = row[1] final_offset = row[6] end
+          if row[2] == nil ok = false else energy += row[2] end
+          if row[3] == nil
+            money_ok = false
+          else
+            if currency != nil && row[4] != currency money_ok = false end
+            currency = row[4]
+            amount += row[3]
+          end
+        end
+      end
+      row = nil
+    end
+    if !yesterday
+      if latest == nil return nil end
+      var repeated = false
+      var k = 0
+      while k < size(edges)
+        if (edges[k] == latest[0]+latest[5] && edges[k+1] != latest[5]) || (edges[k] == latest[1]+latest[6] && edges[k+1] != latest[6]) repeated = true end
+        k += 2
+      end
+      latest[7] = repeated
+      latest.remove(8)
+      return latest
+    end
+    if size(ordered)==0 return nil end
+    var coverage = (first[0]+first[1])%86400 == 0
+    var last = first[0]
+    var k = 0
+    while k < size(ordered)
+      if ordered[k] != last coverage = false end
+      last = ordered[k+1]
+      k += 2
+    end
+    if last != end_at coverage = false end
+    var duration = end_at-first[0]
+    if duration!=82800 && duration!=86400 && duration!=90000 coverage = false end
+    return [first[0],end_at,coverage && ok ? energy : nil,coverage && money_ok ? amount : nil,currency,first[1],final_offset,false]
+  end
+
+  def stale(job)
+    var interval = job == "tomorrow" ? 25200000 : (job == "today" ? 93600000 : 7200000)
+    return self.errors.find(job) != nil || now_ms()-self.got.find(job,0) > interval
+  end
+
+  def record(kind, title, value, unit, detail, color, icon, stale)
+    return {"kind":kind,"title":title,"value":value,"unit":unit,"detail":detail,"color":color,"icon":icon,"stale":stale}
+  end
+
+  def missing(title, detail, unit, icon, job)
+    var why = self.errors.find(job)
+    return self.record("status",title,"--",unit,why == nil ? detail : why,0xFFC857,icon,false)
+  end
+
+  def lookup(at)
+    for d : [self.today,self.tomorrow]
+      if d != nil && at >= d["start"] && at < d["end"]
+        var i = (at-d["start"])/900
+        var k = i*13
+        var rows = d["r"]
+        return [d["start"]+i*900,self.packed_price(rows,k),rows.geti(k+9,4),d["currency"]]
+      end
+    end
+    if self.current != nil && at >= self.current[0] && at < self.current[0]+900 return self.current end
+    return nil
+  end
+
+  def chart(daydata, job)
+    if daydata == nil return self.missing(job == "today" ? "HEUTE" : "MORGEN",job == "today" ? "Preisdaten fehlen" : "Noch nicht veroeffentlicht","","bars",job) end
+    var out = self.chart_cache.find(job)
+    if out == nil
+      var rows = daydata["r"]
+      var lo = daydata["lo"]
+      var hi = daydata["hi"]
+      if lo == nil || hi == nil return self.missing("PREISKURVE","Keine gueltigen Preise","","bars",job) end
+      # Scale the full matrix: minimum at the bottom row, maximum at the top.
+      # The zero line is shown only if zero lies inside the actual day range.
+      var bottom = lo
+      var top = hi
+      if bottom == top bottom -= 1 top += 1 end
+      var bars = []
+      var colors = []
+      var start = daydata["start"]
+      var span = daydata["end"]-start
+      for x : 0..self.sw-1
+        var a = start+(span*x)/self.sw
+        var b = start+(span*(x+1))/self.sw
+        var k = ((a-start)/900)*13
+        var total = 0
+        var count = 0
+        var valid = true
+        while k < size(rows) && start+(k/13)*900 < b
+          var t = start+(k/13)*900
+          var pv = self.packed_price(rows,k)
+          var length = min(b,t+900)-max(a,t)
+          if pv == nil valid = false else total += pv*length end
+          count += length
+          k += 13
+        end
+        var v = valid && count>0 ? self.rounded_div(total,count) : nil
+        bars.push(v == nil ? nil : clamp((v-bottom)*100/(top-bottom),0,100))
+        colors.push(self.price_color(v,daydata))
+      end
+      out = self.record("chart",job == "today" ? "HEUTE" : "MORGEN","",self.price_unit(daydata["currency"]),daydata["ok"] ? "15-Minuten-Preise" : "Preisdaten unvollstaendig",self.low,"bars",false)
+      out["bars"] = bars
+      out["colors"] = colors
+      out["zero"] = bottom <= 0 && top >= 0 ? (-bottom)*100/(top-bottom) : nil
+      out["min"] = self.price_text(lo,daydata["currency"])
+      out["max"] = self.price_text(hi,daydata["currency"])
+      out["daylabel"] = self.date_label(start,rows.geti(9,4))
+      self.chart_cache[job] = out
+    end
+    var now = epoch_ms()/1000
+    out["cursor"] = now >= daydata["start"] && now < daydata["end"] ? (now-daydata["start"])*self.sw/(daydata["end"]-daydata["start"]) : -1
+    out["stale"] = self.stale(job)
+    return out
+  end
+
+  def cheapest()
+    var key = (epoch_ms()+899999)/900000
+    if self.cheap_cache != nil && self.cheap_minute == key
+      self.cheap_cache["stale"] = self.stale("today") || (self.cheap_cache.find("uses_tomorrow",false) && self.stale("tomorrow"))
+      return self.cheap_cache
+    end
+    self.cheap_minute = key
+    var total = 0
+    var length = 0
+    var count = self.window*4
+    var previous = -1
+    var currency = nil
+    var best = nil
+    var best_day = nil
+    for d : [self.today,self.tomorrow]
+      if d != nil
+        var rows = d["r"]
+        var k = 0
+        while k < size(rows)
+          var t = d["start"]+(k/13)*900
+          var v = self.packed_price(rows,k)
+          var offset = rows.geti(k+9,4)
+          if t*1000 >= epoch_ms()
+            if previous+900 != t || currency != d["currency"] || v == nil
+              total = 0
+              length = 0
+            end
+            currency = d["currency"]
+            if v != nil
+              # The verified grid already stores the outgoing price: no extra queue.
+              if length == count
+                var old = t-count*900
+                var origin = old < d["start"] ? self.today : d
+                total -= self.packed_price(origin["r"],((old-origin["start"])/900)*13)
+              else
+                length += 1
+              end
+              total += v
+              if length == count && (best == nil || total < best[0])
+                var start = t-(count-1)*900
+                var origin = start < d["start"] ? self.today : d
+                var from_offset = origin["r"].geti(((start-origin["start"])/900)*13+9,4)
+                best = [total,start,t+900,from_offset,offset,currency]
+                best_day = d
+              end
+            end
+            previous = t
+          end
+          k += 13
+        end
+      end
+    end
+    if best == nil
+      self.cheap_cache = self.missing("ZEITFENSTER","Kein vollstaendiges kommendes "+str(self.window)+"h-Fenster","","clock","today")
+    else
+      var ending = self.lookup(best[2])
+      if ending != nil best[4] = ending[2] end
+      var avg = self.rounded_div(best[0],count)
+      # Without the next point, label the fixed-source-offset range explicitly.
+      var times = self.interval_text(best[1],best[2],best[3],best[4],ending == nil)
+      var uses_tomorrow = self.tomorrow != nil && best[2] > self.tomorrow["start"]
+      self.cheap_cache = self.record("window",str(self.window)+"H GUENSTIG",self.price_text(avg,best[5]),self.price_unit(best[5]),times,self.price_color(avg,best_day),"clock",self.stale("today") || (uses_tomorrow && self.stale("tomorrow")))
+      self.cheap_cache["uses_tomorrow"] = uses_tomorrow
+      self.cheap_cache["time"] = times
+      self.cheap_cache["start"] = best[1]
+      self.cheap_cache["end"] = best[2]
+    end
+    return self.cheap_cache
+  end
+
+  def historical(name)
+    var latest = name == "last_import" || name == "last_export" || name == "last_import_power" || name == "last_export_power"
+    var incoming = name == "last_import" || name == "last_import_power" || name == "yesterday_import" || name == "yesterday_cost"
+    var power = name == "last_import_power" || name == "last_export_power"
+    var money = name == "yesterday_cost" || name == "yesterday_profit"
+    var job = (latest ? "last_" : "yesterday_")+(incoming ? "import" : "export")
+    var title = power ? (incoming ? "MITTEL IN" : "MITTEL OUT") : (latest ? (incoming ? "BEZUG STD" : "EINSP STD") : (incoming ? "BEZUG GEST" : "EINSP GEST"))
+    if money title = incoming ? "KOSTEN GEST" : "ERLOES GEST" end
+    var r = self.history.find(job)
+    if r == nil return self.missing(title,"Keine gelieferten Intervallwerte",power ? "W" : (money ? "" : "kWh"),incoming ? "in" : "out",job) end
+    if !latest && (self.today == nil || r[1] != self.today["start"])
+      return self.missing(title,"Neuer Tag: Daten werden geladen",money ? "" : "kWh",incoming ? "in" : "out",job)
+    end
+    var v = r[money ? 3 : 2]
+    var unit = money ? r[4] : (power ? "W" : "kWh")
+    var label = "--"
+    if v != nil
+      if power
+        var watts = self.rounded_div(v*3600,(r[1]-r[0])*1000)
+        if watts >= 1000
+          label = self.fixed(self.rounded_div(watts,10),2)
+          unit = "kW"
+        else
+          label = str(watts)
+        end
+      else
+        label = self.fixed(self.rounded_div(v,money ? 10000 : 1000),money ? 2 : 3)
+      end
+    end
+    var detail = ""
+    if latest
+      detail = self.interval_text(r[0],r[1],r[5],r[6],r[7])
+    else
+      detail = self.date_label(r[0],r[5])+(v == nil ? " UNVOLLST." : " TAGESWERT")
+    end
+    var aged = self.stale(job) || (latest && epoch_ms()/1000-r[1]>10800)
+    return self.record("value",title,label,unit == nil ? "" : unit,detail,incoming ? self.imp : self.exp,incoming ? "in" : "out",aged)
+  end
+
+  def data_for(name)
+    if !self.auth_ready() return self.record("status","TIBBER","TOKEN","","Token im Datenleser hinterlegen",0xFFC857,"price",false) end
+    if epoch_ms()<0 return self.record("status","UHRZEIT","NTP","","Warte auf gueltige Uhrzeit",0xFFC857,"clock",false) end
+    if self.home == nil return self.missing("TIBBER","Zuhause wird geladen","","price","homes") end
+    if name == "today_chart" return self.chart(self.today,"today") end
+    if name == "tomorrow_chart" return self.chart(self.tomorrow,"tomorrow") end
+    if name == "cheap_window" return self.cheapest() end
+    if name == "price_min" || name == "price_max" || name == "price_mean"
+      var d = self.today
+      var title = name == "price_min" ? "MIN HEUTE" : (name == "price_max" ? "MAX HEUTE" : "MITTEL HEUTE")
+      if d == nil return self.missing(title,"Preisdaten fehlen","","price","today") end
+      if !d["ok"] return self.missing(title,"Preise unvollstaendig","","price","today") end
+      var value = d[name == "price_min" ? "lo" : (name == "price_max" ? "hi" : "mean")]
+      var color = name == "price_min" ? self.low : (name == "price_max" ? self.high : 0xFFC857)
+      var detail = self.date_label(d["start"],d["r"].geti(9,4))+" TAGESWERT"
+      return self.record("value",title,self.price_text(value,d["currency"]),self.price_unit(d["currency"]),detail,color,"price",self.stale("today"))
+    end
+    if name == "price" || name == "next"
+      var target = (epoch_ms()/900000)*900+(name == "next" ? 900 : 0)
+      var p = self.lookup(target)
+      var job = self.tomorrow != nil && target >= self.tomorrow["start"] ? "tomorrow" : "today"
+      if p == nil || p[1] == nil return self.missing(name == "price" ? "JETZT" : "DANACH","Preis fuer dieses Intervall fehlt","","price",job) end
+      var ending = self.lookup(p[0]+900)
+      var end_offset = ending == nil ? p[2] : ending[2]
+      # Without the next point, label the fixed-source-offset range explicitly.
+      var detail = self.interval_text(p[0],p[0]+900,p[2],end_offset,ending == nil)
+      return self.record("value",name == "price" ? "JETZT" : "DANACH",self.price_text(p[1],p[3]),self.price_unit(p[3]),detail,self.price_color(p[1],job == "tomorrow" ? self.tomorrow : self.today),"price",self.stale(job))
+    end
+    return self.historical(name)
+  end
+end
+
+
+class GridGlowData : GridGlowCore
+  var modes, scan_due, heartbeat_due, had_auth, context, chart_marks
+
+  def init()
+    self.core_init()
+    self.modes = ["price","next","today_chart","tomorrow_chart","price_min","price_max","price_mean","cheap_window","last_import","last_export","last_import_power","last_export_power","yesterday_import","yesterday_export","yesterday_cost","yesterday_profit"]
+    self.chart_marks = [nil,nil]
+    self.scan_due = 0 self.heartbeat_due = 0 self.had_auth = self.auth_ready()
+    self.change_context()
+  end
+
+  def setup()
+    self.loop()
+  end
+
+  # A persisted serial also distinguishes two restarts within one clock tick.
+  def change_context()
+    var serial = store.get("gg_context",0)
+    if type(serial) != "int" serial = 0 end
+    serial = (serial%2147483647)+1
+    store.set("gg_context",serial)
+    self.context = str(epoch_ms())+":"+str(now_ms())+":"+str(serial)
+    self.heartbeat_due = 0
+    shared.set("context",nil)
+    shared.set("context",self.context)
+  end
+
+  # Each display owns its announcement. The host deletes it when that app stops.
+  def scan_readers()
+    var wanted = []
+    for key : shared.keys()
+      var n = size(key)
+      if n > 8 && key[n-8..n-1] == ".gg_view"
+        var age = shared.age(key)
+        if age != nil && age <= 90000
+          var mode = shared.get(key)
+          if self.modes.find(mode) != nil && wanted.find(mode) == nil
+            wanted.push(mode)
+          end
+        end
+      end
+    end
+    for mode : self.requested
+      if wanted.find(mode) == nil shared.set(mode,nil) end
+    end
+    self.requested = wanted
+    if !self.enabled("cheap_window") self.cheap_cache = nil end
+    self.scan_due = now_ms()+5000
+    if self.busy && !self.needed(self.request_job) self.cancel_pending() end
+  end
+
+  # Secrets are app-owned. Removal clears all old account data, including in-flight work.
+  def clear_credentials()
+    self.cancel_pending()
+    var wanted = self.requested
+    self.core_init()
+    self.requested = wanted
+    for mode : self.modes shared.set(mode,nil) end
+    self.change_context()
+  end
+
+  # Translate a successful fetch's monotonic timestamp into UTC, without freshening it.
+  def fetched_at(job)
+    var at = self.got.find(job)
+    var clock = epoch_ms()
+    if at == nil || clock < 0 || now_ms() < at return nil end
+    return (clock-(now_ms()-at))/1000
+  end
+
+  def publication(mode)
+    var view = self.data_for(mode)
+    view["context"] = self.context
+    if view["kind"] == "status" return view end
+    var job = "today"
+    var until = self.today == nil ? nil : self.today["end"]
+    if mode == "price" || mode == "next"
+      var target = (epoch_ms()/900000)*900+(mode == "next" ? 900 : 0)
+      job = self.tomorrow != nil && target >= self.tomorrow["start"] ? "tomorrow" : "today"
+      until = target+(mode == "price" ? 900 : 0)
+    elif mode == "tomorrow_chart"
+      job = "tomorrow"
+      until = self.tomorrow["start"]
+    elif mode == "cheap_window"
+      until = view["start"]+1
+      if self.tomorrow != nil && view["start"] >= self.tomorrow["start"] job = "tomorrow" end
+    elif mode == "last_import" || mode == "last_import_power"
+      job = "last_import"
+    elif mode == "last_export" || mode == "last_export_power"
+      job = "last_export"
+    elif mode == "yesterday_import" || mode == "yesterday_cost"
+      job = "yesterday_import"
+    elif mode == "yesterday_export" || mode == "yesterday_profit"
+      job = "yesterday_export"
+    end
+    var fetched = self.fetched_at(job)
+    if mode == "cheap_window" && job == "today" && view.find("uses_tomorrow",false)
+      var other = self.fetched_at("tomorrow")
+      fetched = fetched == nil || other == nil ? nil : min(fetched,other)
+    end
+    if until != nil view["valid_until"] = until end
+    if fetched != nil view["source_fetched_at"] = fetched end
+    return view
+  end
+
+  # Shared holds the only serialized copy; avoid retaining a second set in the VM.
+  def publish_view(mode)
+    var chart_index = mode == "today_chart" ? 0 : (mode == "tomorrow_chart" ? 1 : nil)
+    var mark = nil
+    var job = chart_index == 0 ? "today" : "tomorrow"
+    if chart_index != nil
+      var day = chart_index == 0 ? self.today : self.tomorrow
+      if day != nil
+        var now = epoch_ms()/1000
+        var cursor = now >= day["start"] && now < day["end"] ? (now-day["start"])*self.sw/(day["end"]-day["start"]) : -1
+        mark = self.got.find(job,0)*128+(cursor+1)*2+(self.stale(job) ? 1 : 0)
+        if self.chart_marks[chart_index] == mark && shared.age(mode) != nil return end
+      end
+    end
+    var view = self.publication(mode)
+    var encoded = json.dump(view)
+    view = nil
+    var committed = true
+    if encoded != shared.get(mode)
+      # A refused replacement leaves the old value in Shared; explicitly invalidate it.
+      if !shared.set(mode,encoded) shared.set(mode,nil) committed = false end
+    end
+    if chart_index != nil
+      self.chart_marks[chart_index] = committed ? mark : nil
+      # Pixels are retained in Shared; rebuild only when source, cursor or freshness changes.
+      self.chart_cache.remove(job)
+    end
+  end
+
+  def loop()
+    var auth = self.auth_ready()
+    if self.had_auth && !auth self.clear_credentials() end
+    self.had_auth = auth
+    if now_ms() >= self.scan_due self.scan_readers() end
+    self.core_loop()
+    for mode : self.requested self.publish_view(mode) end
+    if now_ms() >= self.heartbeat_due
+      if shared.set("context",self.context) && shared.set("protocol",1) && shared.set("heartbeat",now_ms())
+        self.heartbeat_due = now_ms()+30000
+      else
+        shared.set("heartbeat",nil)
+        self.heartbeat_due = now_ms()+5000
+      end
+    end
+  end
+
+  def auth_ready()
+    var token = store.get("api_token", "")
+    return type(token) == "string" && size(token) > 0
+  end
+
+  def auth_value()
+    return "Bearer " + store.get("api_token", "")
+  end
+end
+
+return GridGlowData()

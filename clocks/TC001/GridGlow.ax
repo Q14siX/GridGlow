@@ -1,0 +1,14 @@
+# @name GridGlow
+# @desc Eine feste Tibber-Ansicht; fuer weitere Ansichten mit anderem Namen erneut installieren
+# @author Q14siX
+# @version 20261113.145453
+# @display 32x8
+# @requires gridglow_view
+# @requires gridglow_data
+# @config view select "Anzeige" default="Strompreis jetzt" options="Strompreis jetzt,Nächster Strompreis,Preiskurve heute,Preiskurve morgen,Tiefster Preis heute,Höchster Preis heute,Mittlerer Preis heute,Günstiges Zeitfenster,Bezug Intervall,Einspeisung Intervall,Bezugsleistung Mittel,Einspeiseleistung Mittel,Bezugsenergie gestern,Einspeiseenergie gestern,Bezugskosten gestern,Einspeiseerlös gestern" help="Genau eine Ansicht je Installation. Fuer weitere Ansichten die Anzeige mehrfach installieren."
+# @config seconds number "Mindestdauer" default=10 min=6 max=30 step=1 unit=s help="Lange Texte laufen mindestens zweimal vollstaendig; die Uhr wechselt danach weiter." group="Anzeige"
+# @config motion bool "Animationen und blinkender Zeitmarker" default=true group="Anzeige"
+# @config logo bool "GridGlow-Logo anzeigen" default=true group="Anzeige"
+
+import gridglow_view
+return gridglow_view()

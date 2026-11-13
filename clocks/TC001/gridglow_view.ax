@@ -1,0 +1,253 @@
+# @name GridGlow Anzeige-Modul
+# @desc Gemeinsamer Darstellungscode fuer GridGlow-Anzeigen
+# @module gridglow_view
+# @author Q14siX
+# @version 20261113.145453
+# @display 32x8
+
+import json
+
+class GridGlowState
+  var shown, valid_until, data_context, view, kind, title, value, unit, detail, tint, view_stale
+  var headline, vline, head_ms, val_ms, detail_ms, dwell, logo_ms
+  var bars, barcolors, barzero, cursor
+end
+
+class GridGlow
+  var visible, seconds, motion, publish_at, mode, logo_enabled, snapshot
+
+  def init()
+    self.mode = {
+      "Strompreis jetzt":"price", "Nächster Strompreis":"next",
+      "Preiskurve heute":"today_chart", "Preiskurve morgen":"tomorrow_chart",
+      "Tiefster Preis heute":"price_min", "Höchster Preis heute":"price_max",
+      "Mittlerer Preis heute":"price_mean", "Günstiges Zeitfenster":"cheap_window",
+      "Bezug Intervall":"last_import", "Einspeisung Intervall":"last_export",
+      "Bezugsleistung Mittel":"last_import_power", "Einspeiseleistung Mittel":"last_export_power",
+      "Bezugsenergie gestern":"yesterday_import", "Einspeiseenergie gestern":"yesterday_export",
+      "Bezugskosten gestern":"yesterday_cost", "Einspeiseerlös gestern":"yesterday_profit"
+    }.find(store.get("view"), "price")
+    self.visible = false
+    self.seconds = clamp(int(store.get("seconds")), 6, 30)
+    self.motion = store.get("motion")
+    self.logo_enabled = store.get("logo")
+    self.publish_at = 0
+    self.register()
+    self.release_view()
+  end
+
+  def setup()
+    self.register()
+  end
+
+  def loop()
+    self.register()
+    if self.visible
+      if !self.provider_ready() self.snapshot.view_stale = true end
+      if shared.age("gridglow_data." + self.mode) == nil self.snapshot.view_stale = true end
+      # Chart stays visible until AWTRIX switches apps; expiry is not a slideshow.
+      if shared.get("gridglow_data.context") != self.snapshot.data_context || (self.snapshot.valid_until != nil && epoch_ms() / 1000 >= self.snapshot.valid_until) || (self.snapshot.kind != "chart" && now_ms() - self.snapshot.shown >= self.snapshot.dwell)
+        self.refresh_view()
+      elif self.snapshot.kind == "status" && self.provider_ready()
+        var ready = self.read_view(self.mode)
+        if ready.find("kind", "value") != "status"
+          self.snapshot.view = ready
+          self.prepare_view()
+          self.snapshot.shown = now_ms()
+        end
+      end
+    end
+  end
+
+  def register()
+    if now_ms() >= self.publish_at
+      if shared.set("gg_view", self.mode)
+        self.publish_at = now_ms() + 30000
+      end
+    end
+  end
+
+  def provider_ready()
+    var age = shared.age("gridglow_data.heartbeat")
+    return shared.get("gridglow_data.protocol") == 1 && shared.get("gridglow_data.context") != nil && age != nil && age <= 90000
+  end
+
+  def fallback(message)
+    return {"kind":"status", "title":"GRIDGLOW", "value":"--", "unit":"", "detail":message, "color":0xFFC857, "icon":"clock", "stale":true}
+  end
+
+  def read_view(name)
+    if !self.provider_ready()
+      return self.fallback(shared.get("gridglow_data.protocol") == nil ? "DATENLESER STARTEN" : "DATENLESER PRUEFEN")
+    end
+    var payload = shared.get("gridglow_data." + name)
+    if type(payload) != "string" return self.fallback("WARTE AUF TIBBER-DATEN") end
+    try
+      var result = json.load(payload)
+      if isinstance(result, map)
+        if result.find("context") != self.snapshot.data_context return self.fallback("DATENKONTEXT WECHSELT") end
+        var deadline = result.find("valid_until")
+        if deadline != nil && epoch_ms() / 1000 >= deadline return self.fallback("WARTE AUF AKTUELLEN WERT") end
+        return result
+      end
+    except ..
+    end
+    return self.fallback("DATENFORMAT PRUEFEN")
+  end
+
+  def refresh_view()
+    # If a live chart is refreshed, do not flash its heading again.
+    var chart_was_visible = self.visible && self.snapshot != nil && self.snapshot.kind == "chart"
+    self.release_view()
+    self.snapshot = GridGlowState()
+    self.snapshot.data_context = shared.get("gridglow_data.context")
+    self.snapshot.view = self.read_view(self.mode)
+    self.prepare_view()
+    self.snapshot.shown = now_ms()
+    if chart_was_visible && self.snapshot.kind == "chart"
+      self.snapshot.shown -= self.snapshot.logo_ms + self.snapshot.head_ms + 10
+    end
+  end
+
+  def release_view()
+    self.snapshot = nil
+  end
+
+  def line_ms(s, minimum, left)
+    font("small")
+    var distance = text_ink_width(s) - (width() - left)
+    if distance <= 0 return minimum end
+    var cycle = 1600 + (distance * 1000 + 17) / 18
+    return max(2, (minimum + cycle - 1) / cycle) * cycle
+  end
+
+  def view_time()
+    return min(max(0, now_ms() - self.snapshot.shown), max(0, self.snapshot.dwell - 1)) - self.snapshot.logo_ms
+  end
+
+  def prepare_view()
+    var s = self.snapshot
+    s.kind = s.view.find("kind", "value")
+    s.title = s.view.find("title", "GRIDGLOW")
+    s.value = s.view.find("value", "--")
+    s.unit = s.view.find("unit", "")
+    s.detail = s.view.find("detail", "")
+    s.tint = s.view.find("color", 0x62D8FF)
+    s.view_stale = s.view.find("stale", false)
+    s.valid_until = s.view.find("valid_until")
+    s.headline = s.title
+    if s.kind == "chart" && s.unit != "" s.headline += " " + s.unit end
+    s.vline = s.value + (s.unit == "" ? "" : " " + s.unit)
+    s.head_ms = self.line_ms(s.headline, 1700, 0)
+    s.val_ms = self.line_ms(s.vline, 3000, 0)
+    s.detail_ms = s.detail == "" ? 0 : self.line_ms(s.detail, 2200, 0)
+    s.logo_ms = self.logo_enabled ? 900 : 0
+    s.bars = s.view.find("bars", [])
+    s.barcolors = s.view.find("colors", [])
+    s.barzero = s.view.find("zero")
+    s.cursor = s.view.find("cursor", -1)
+    if s.kind == "chart"
+      s.dwell = max(self.seconds * 1000, s.head_ms + 5000)
+    else
+      s.val_ms = self.line_ms(s.vline, max(3000, self.seconds * 1000 - s.head_ms - s.detail_ms), 0)
+      s.dwell = s.head_ms + s.val_ms + s.detail_ms
+    end
+    s.dwell += s.logo_ms
+  end
+
+  def should_show()
+    return true
+  end
+
+  def duration()
+    return self.snapshot.dwell
+  end
+
+  def on_show()
+    self.visible = true
+    self.refresh_view()
+  end
+
+  def on_hide()
+    self.visible = false
+    self.release_view()
+  end
+
+  def pan(s, y, c, elapsed, span, left)
+    var available = width() - left
+    var w = text_ink_width(s)
+    var x = left + (available - w) / 2
+    if w > available
+      var distance = w - available
+      var cycle = 1600 + (distance * 1000 + 17) / 18
+      var passes = max(2, span / cycle)
+      var t = min(max(0, elapsed), passes * cycle - 1) % cycle
+      x = left - min(distance, max(0, t - 800) * 18 / 1000)
+    end
+    text(x, y, s, c)
+    if left > 0 rect_fill(0, 0, left, 8, 0x000000) end
+  end
+
+  # The GridGlow lightning mark is drawn on the matrix, without an image asset.
+  def mark(x, y)
+    line(x + 4, y, x + 1, y + 3, 0x62D8FF)
+    line(x + 5, y, x + 2, y + 3, 0x62D8FF)
+    line(x + 1, y + 3, x + 6, y + 3, 0xFFFFFF)
+    line(x + 4, y + 4, x + 2, y + 6, 0x2DE2BA)
+    line(x + 5, y + 4, x + 2, y + 7, 0x2DE2BA)
+  end
+
+  def graph(top, high)
+    var h = high - 1
+    var base = self.snapshot.barzero == nil ? top + h : top + h - self.snapshot.barzero * h / 100
+    if self.snapshot.barzero != nil line(0, base, width() - 1, base, 0x263342) end
+    var last = nil
+    var x = 0
+    while x < size(self.snapshot.bars) && x < width()
+      var p = self.snapshot.bars[x]
+      if p != nil
+        var c = x < size(self.snapshot.barcolors) ? self.snapshot.barcolors[x] : 0x62D8FF
+        var y = top + h - p * h / 100
+        line(x, base, x, y, (c & 0xFCFCFC) >> 2)
+        if last != nil line(x - 1, last, x, y, c) else pixel(x, y, c) end
+        last = y
+      else
+        last = nil
+      end
+      x += 1
+    end
+    if self.snapshot.cursor >= 0 && self.snapshot.cursor < size(self.snapshot.bars) && self.snapshot.cursor < width()
+      if !self.motion || (now_ms() / 600) % 2 == 0 line(self.snapshot.cursor, top, self.snapshot.cursor, top + h, 0xFFFFFF) end
+    end
+  end
+
+  def draw()
+    clear()
+    font("small")
+    if !self.visible return end
+    var s = self.snapshot
+    var t = self.view_time()
+    if t < 0
+      self.mark((width() - 8) / 2, 0)
+      return
+    end
+    if s.kind == "chart"
+      if t < s.head_ms || size(s.bars) == 0
+        self.pan(s.headline, 6, s.tint, t, s.head_ms, 0)
+      else
+        self.graph(0, height())
+      end
+    else
+      if t < s.head_ms
+        self.pan(s.headline, 6, s.tint, t, s.head_ms, 0)
+      elif t < s.head_ms + s.val_ms
+        self.pan(s.vline, 6, s.tint, t - s.head_ms, s.val_ms, 0)
+      else
+        self.pan(s.detail, 6, 0xAABCD0, t - s.head_ms - s.val_ms, s.detail_ms, 0)
+      end
+    end
+    if s.view_stale pixel(width() - 1, 0, 0xFFB14A) end
+  end
+end
+
+return GridGlow
